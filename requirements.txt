@@ -1,0 +1,8 @@
+Flask>=2.0
+bcrypt
+pyjwt
+cryptography
+PyPDF2
+requests
+python-dotenv
+email-validator

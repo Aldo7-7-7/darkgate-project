@@ -21,13 +21,6 @@
     <a href="{{ url_for('forgot_password') }}">¿Olvidaste tu contraseña?</a>
 </p>
 
-<p>
-    <!-- ENLACES DE FIRMA DIGITAL Y VERIFICACIÓN -->
-    <a href="/generate_pdf">Generar PDF de prueba</a> | 
-    <a href="/sign_pdf">Firmar PDF</a> | 
-    <a href="{{ url_for('verify_signature') }}">Verificar Firma</a>  
-</p>
-
 <!-- El SCRIPT de Google va aquí para cargarse correctamente -->
 {% if recaptcha_site_key %}
     <script src="https://www.google.com/recaptcha/api.js" async defer></script>

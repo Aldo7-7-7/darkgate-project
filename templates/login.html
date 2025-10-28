@@ -8,6 +8,7 @@
     <label>Usuario</label><input name="username" required>
     <label>Contraseña</label><input name="password" type="password" required>
 
+    <!-- El WIDGET de reCAPTCHA va DENTRO del formulario -->
     {% if recaptcha_site_key %}
         <div class="g-recaptcha" data-sitekey="{{ recaptcha_site_key }}"></div>
     {% endif %}
@@ -15,8 +16,17 @@
     <button type="submit" class="btn">Entrar</button>
 </form>
 
-<p><a href="/generate_pdf">Generar PDF de prueba</a> | <a href="/sign_pdf">Firmar PDF</a></p>
+<p>
+    <!-- ENLACE DE RECUPERACIÓN DE CONTRASEÑA -->
+    <a href="{{ url_for('forgot_password') }}">¿Olvidaste tu contraseña?</a>
+</p>
 
+<p>
+    <a href="/generate_pdf">Generar PDF de prueba</a> | 
+    <a href="/sign_pdf">Firmar PDF</a>
+</p>
+
+<!-- El SCRIPT de Google va aquí, fuera del formulario, para cargarse correctamente -->
 {% if recaptcha_site_key %}
     <script src="https://www.google.com/recaptcha/api.js" async defer></script>
 {% endif %}

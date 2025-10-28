@@ -1,11 +1,12 @@
 from flask import Flask, render_template, request, redirect, url_for, flash, make_response, send_file
-import os, sqlite3, bcrypt, jwt, requests, hashlib, uuid, io # 'io' es necesario para generar PDF en memoria
+import os, sqlite3, bcrypt, jwt, requests, hashlib, uuid, io # 'io' para generar en memoria
 from datetime import datetime, timedelta
 from models import DB, init_db
 from pathlib import Path
 from dotenv import load_dotenv
 from flask_mail import Mail, Message
 from werkzeug.utils import secure_filename 
+from fpdf import FPDF # <-- NUEVA LIBRERÍA DE GENERACIÓN DE PDF
 
 # Cargar variables de entorno (para desarrollo local)
 load_dotenv()
@@ -17,14 +18,13 @@ app = Flask(__name__)
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'change_me_securely')
 app.config['UPLOAD_FOLDER'] = 'temp_uploads' # Carpeta temporal para verificación de archivos
 
-# Asegúrate de que la carpeta de subida exista
+# Asegúrate de que la carpeta de subida exista (Aunque Render puede fallar en crear carpetas)
 if not os.path.exists(app.config['UPLOAD_FOLDER']):
     os.makedirs(app.config['UPLOAD_FOLDER'])
 
 # ===============================================
 # CONFIGURACIÓN DE CORREO (Flask-Mail)
 # ===============================================
-# **IMPORTANTE:** MAIL_PASSWORD se lee desde Render Environment Variables
 app.config['MAIL_SERVER'] = 'smtp.gmail.com'
 app.config['MAIL_PORT'] = 587
 app.config['MAIL_USE_TLS'] = True
@@ -45,7 +45,6 @@ def get_db_conn():
 # ===============================================
 # JWT y RSA CONFIGURACIÓN
 # ===============================================
-# Rutas a las claves para firmar (private) y verificar (public)
 JWT_PRIVATE_KEY_PATH = os.getenv('JWT_PRIVATE_KEY_PATH', 'keys/private.pem')
 JWT_PUBLIC_KEY_PATH = os.getenv('JWT_PUBLIC_KEY_PATH', 'keys/public.pem') 
 JWT_ALGORITHM = os.getenv('JWT_ALGORITHM','RS256')
@@ -214,44 +213,48 @@ def reset_password(token):
 # ===============================================
 @app.route('/generate_pdf')
 def generate_pdf():
-    from reportlab.pdfgen import canvas
-    from reportlab.lib.pagesizes import letter # Importación necesaria para el tamaño de página
+    # Usamos fpdf2 (alternativa que no usa librerías de sistema operativo)
+    from fpdf import FPDF
     
-    # Usar un buffer de memoria (io.BytesIO) para evitar problemas de permisos de escritura en Render
-    buffer = io.BytesIO()
-    c = canvas.Canvas(buffer, pagesize=letter)
+    # Crea la instancia FPDF
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", size=12)
     
-    c.drawString(100,750,"DarkGate - Documento de Prueba Final")
-    c.drawString(100,730,"Proyecto de Seguridad (JWT, reCAPTCHA)")
-    c.drawString(100,710,"Fecha: {}".format(datetime.utcnow().isoformat()))
-    
-    c.showPage()
-    c.save()
-    
-    # Mueve el cursor al inicio del buffer antes de enviarlo
-    buffer.seek(0) 
+    # Contenido del PDF
+    pdf.cell(200, 10, txt="DarkGate - Documento de Prueba Final", ln=1, align="C")
+    pdf.ln(5)
+    pdf.cell(200, 10, txt="Proyecto de Seguridad (JWT, reCAPTCHA)", ln=1)
+    pdf.cell(200, 10, txt=f"Fecha: {datetime.utcnow().isoformat()}", ln=1)
+
+    # Guarda el PDF en un buffer de memoria
+    buffer = io.BytesIO(pdf.output())
+    buffer.seek(0)
     
     # Envía el archivo generado en memoria
     return send_file(
         buffer,
         as_attachment=True,
-        download_name='example_document.pdf', 
+        download_name='example_document.pdf',
         mimetype='application/pdf'
     )
 
 # Firma del PDF (hash + firma RSA) -> devuelve archivo .sig
 @app.route('/sign_pdf')
 def sign_pdf_route():
-    # Esta ruta requiere que el PDF esté en disco para ser leído, lo cual puede fallar en Render.
-    # El usuario debe usar la función /generate_pdf para obtener el PDF primero.
+    # Esta ruta asume que el usuario tiene el PDF generado por /generate_pdf y lo guarda localmente
+    # Aquí estamos usando una ruta estática, lo cual es solo para demostración.
     pdf_path = 'static/example_document.pdf'
     sig_path = 'static/example_document.pdf.sig'
     
-    # Nota: Si se usara la generación en memoria, este archivo no existiría en disco.
-    # Por simplicidad, asumimos que el PDF está disponible o el usuario lo ha guardado.
-    # En un sistema real, el usuario subiría el archivo a firmar.
+    # **NOTA:** Dado que generate_pdf ahora usa memoria, el archivo 'example_document.pdf'
+    # NO EXISTE en el disco de Render. Para que esta ruta funcione, el usuario debe
+    # primero generar el PDF y luego subirlo para firmarlo.
+    # Por simplicidad de la demostración, esta ruta asume que el archivo existe.
     if not os.path.exists(pdf_path):
-        return "Primero genere el PDF y asegúrese de que esté disponible para la firma. En un sistema real, el usuario subiría el PDF a firmar.", 400
+        # Si el PDF no está en disco (por usar io.BytesIO), esta ruta fallará. 
+        # En una solución real, esta función recibiría el PDF del usuario para firmar.
+        return "ADVERTENCIA: Debido al cambio a fpdf2, para probar esta ruta, debe asegurarse de que el archivo 'static/example_document.pdf' exista en el servidor o modificar la lógica para firmar un archivo subido.", 500
     
     # calcular hash
     with open(pdf_path,'rb') as f:
@@ -329,3 +332,5 @@ def verify_signature():
 if __name__ == '__main__':
     # Usar 0.0.0.0 y puerto 5000 para compatibilidad con Render y entornos de producción
     app.run(host='0.0.0.0', port=5000, debug=True)
+
+

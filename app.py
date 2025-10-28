@@ -1,12 +1,13 @@
 from flask import Flask, render_template, request, redirect, url_for, flash, make_response, send_file
-import os, sqlite3, bcrypt, jwt, requests, hashlib, uuid, io # 'io' para generar en memoria
+import os, sqlite3, bcrypt, jwt, requests, hashlib, uuid, io # 'io' es para generación de PDF en memoria
 from datetime import datetime, timedelta
 from models import DB, init_db
 from pathlib import Path
 from dotenv import load_dotenv
 from flask_mail import Mail, Message
 from werkzeug.utils import secure_filename 
-from fpdf import FPDF # <-- NUEVA LIBRERÍA DE GENERACIÓN DE PDF
+from fpdf import FPDF # <-- FIX para generación de PDF sin dependencias de sistema
+from functools import wraps # Para el decorador de autenticación
 
 # Cargar variables de entorno (para desarrollo local)
 load_dotenv()
@@ -16,9 +17,8 @@ load_dotenv()
 # ===============================================
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'change_me_securely')
-app.config['UPLOAD_FOLDER'] = 'temp_uploads' # Carpeta temporal para verificación de archivos
+app.config['UPLOAD_FOLDER'] = 'temp_uploads' 
 
-# Asegúrate de que la carpeta de subida exista (Aunque Render puede fallar en crear carpetas)
 if not os.path.exists(app.config['UPLOAD_FOLDER']):
     os.makedirs(app.config['UPLOAD_FOLDER'])
 
@@ -71,6 +71,46 @@ def validar_recaptcha(response_token):
     return resultado.get('success', False)
 # ===============================================
 
+# ===============================================
+# DECORADOR DE AUTENTICACIÓN JWT (RSA/HS256)
+# ===============================================
+def token_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        token = request.cookies.get('access_token')
+
+        if not token:
+            flash('Acceso denegado. Por favor, inicia sesión.', 'danger')
+            return redirect(url_for('login'))
+        
+        try:
+            # Intentar decodificar el token con la clave pública (RSA)
+            if JWT_PUBLIC_KEY_PATH and os.path.exists(JWT_PUBLIC_KEY_PATH):
+                from cryptography.hazmat.primitives.serialization import load_pem_public_key
+                with open(JWT_PUBLIC_KEY_PATH, 'rb') as kf:
+                    public_key = load_pem_public_key(kf.read())
+                data = jwt.decode(token, public_key, algorithms=[JWT_ALGORITHM])
+            else:
+                # Decodificar con SECRET_KEY si no hay clave pública (Modo DEV/HS256)
+                data = jwt.decode(token, app.config['SECRET_KEY'], algorithms=['HS256'])
+            
+            # Pasar los datos del token a la función decorada
+            return f(data, *args, **kwargs)
+            
+        except jwt.ExpiredSignatureError:
+            flash('Tu sesión ha expirado. Por favor, vuelve a iniciar sesión.', 'danger')
+            resp = make_response(redirect(url_for('login')))
+            resp.set_cookie('access_token', '', expires=0) # Borra la cookie
+            return resp
+        except jwt.InvalidTokenError:
+            flash('Token inválido. Acceso denegado.', 'danger')
+            resp = make_response(redirect(url_for('login')))
+            resp.set_cookie('access_token', '', expires=0) 
+            return resp
+
+    return decorated
+# ===============================================
+
 
 @app.route('/')
 def index():
@@ -79,7 +119,6 @@ def index():
 @app.route('/register', methods=['GET','POST'])
 def register():
     if request.method == 'POST':
-        # Nota: Idealmente se debe añadir reCAPTCHA también al registro
         username = request.form['username'].strip()
         email = request.form['email'].strip()
         password = request.form['password'].encode('utf-8')
@@ -119,7 +158,6 @@ def login():
         conn.close()
         
         if row and bcrypt.checkpw(password, row[1].encode('utf-8')):
-            # Generación de JWT (usando RS256 si hay clave, o HS256 si es desarrollo)
             payload = {
                 'sub': row[0],
                 'iat': datetime.utcnow(),
@@ -128,11 +166,9 @@ def login():
             if PRIVATE_KEY:
                 token = jwt.encode(payload, PRIVATE_KEY, algorithm=JWT_ALGORITHM)
             else:
-                # Usa la SECRET_KEY de Flask si no se encontró la clave RSA (Modo DEV)
                 token = jwt.encode(payload, app.config['SECRET_KEY'], algorithm='HS256')
             
             resp = make_response(redirect(url_for('dashboard')))
-            # secure=True es crucial para HTTPS en Render
             resp.set_cookie('access_token', token, httponly=True, secure=True, samesite='Lax') 
             return resp
         else:
@@ -141,7 +177,8 @@ def login():
     return render_template('login.html', recaptcha_site_key=os.getenv('RECAPTCHA_SITE_KEY',''))
 
 @app.route('/dashboard')
-def dashboard():
+@token_required # <-- RUTA PROTEGIDA
+def dashboard(current_user):
     return render_template('dashboard.html')
 
 # ===============================================
@@ -211,8 +248,11 @@ def reset_password(token):
 # ===============================================
 # RUTAS DE PDF Y FIRMA DIGITAL
 # ===============================================
+
 @app.route('/generate_pdf')
-def generate_pdf():
+@token_required # <-- RUTA PROTEGIDA
+def generate_pdf(current_user):
+    
     # Usamos fpdf2 (alternativa que no usa librerías de sistema operativo)
     from fpdf import FPDF
     
@@ -224,8 +264,9 @@ def generate_pdf():
     # Contenido del PDF
     pdf.cell(200, 10, txt="DarkGate - Documento de Prueba Final", ln=1, align="C")
     pdf.ln(5)
+    pdf.cell(200, 10, txt=f"Generado por: Usuario ID {current_user.get('sub')}", ln=1)
     pdf.cell(200, 10, txt="Proyecto de Seguridad (JWT, reCAPTCHA)", ln=1)
-    pdf.cell(200, 10, txt=f"Fecha: {datetime.utcnow().isoformat()}", ln=1)
+    pdf.cell(200, 10, txt=f"Fecha de Creación: {datetime.utcnow().isoformat()}", ln=1)
 
     # Guarda el PDF en un buffer de memoria
     buffer = io.BytesIO(pdf.output())
@@ -235,54 +276,61 @@ def generate_pdf():
     return send_file(
         buffer,
         as_attachment=True,
-        download_name='example_document.pdf',
+        download_name='document_to_sign.pdf',
         mimetype='application/pdf'
     )
 
 # Firma del PDF (hash + firma RSA) -> devuelve archivo .sig
-@app.route('/sign_pdf')
-def sign_pdf_route():
-    # Esta ruta asume que el usuario tiene el PDF generado por /generate_pdf y lo guarda localmente
-    # Aquí estamos usando una ruta estática, lo cual es solo para demostración.
-    pdf_path = 'static/example_document.pdf'
-    sig_path = 'static/example_document.pdf.sig'
+@app.route('/sign_pdf', methods=['GET', 'POST']) # <-- AHORA ACEPTA POST
+@token_required 
+def sign_pdf_route(current_user):
+    # Si es GET, muestra el formulario
+    if request.method == 'GET':
+        return render_template('sign_pdf.html')
+
+    # Si es POST, realiza la firma
+    if 'pdf_file' not in request.files:
+        flash('Debes subir el archivo PDF a firmar.', 'danger')
+        return redirect(url_for('sign_pdf_route'))
+
+    pdf_file = request.files['pdf_file']
+    if pdf_file.filename == '':
+        flash('Debes seleccionar un archivo PDF válido.', 'danger')
+        return redirect(url_for('sign_pdf_route'))
     
-    # **NOTA:** Dado que generate_pdf ahora usa memoria, el archivo 'example_document.pdf'
-    # NO EXISTE en el disco de Render. Para que esta ruta funcione, el usuario debe
-    # primero generar el PDF y luego subirlo para firmarlo.
-    # Por simplicidad de la demostración, esta ruta asume que el archivo existe.
-    if not os.path.exists(pdf_path):
-        # Si el PDF no está en disco (por usar io.BytesIO), esta ruta fallará. 
-        # En una solución real, esta función recibiría el PDF del usuario para firmar.
-        return "ADVERTENCIA: Debido al cambio a fpdf2, para probar esta ruta, debe asegurarse de que el archivo 'static/example_document.pdf' exista en el servidor o modificar la lógica para firmar un archivo subido.", 500
-    
-    # calcular hash
-    with open(pdf_path,'rb') as f:
-        pdf_bytes = f.read()
+    # Leer archivo subido y calcular hash
+    pdf_bytes = pdf_file.read()
     digest = hashlib.sha256(pdf_bytes).digest()
     
-    # firmar con clave privada si existe
+    # firmar con clave privada (RSA)
     from cryptography.hazmat.primitives.serialization import load_pem_private_key
     from cryptography.hazmat.primitives.asymmetric import padding
     from cryptography.hazmat.primitives import hashes
     
     if not os.path.exists(JWT_PRIVATE_KEY_PATH):
-        return "No existe la clave privada en keys/private.pem. Genere las claves (openssl).", 500
+        return "No existe la clave privada en keys/private.pem. Asegúrese de haber generado las claves (openssl).", 500
     
     with open(JWT_PRIVATE_KEY_PATH,'rb') as kf:
         private = load_pem_private_key(kf.read(), password=None)
         
     signature = private.sign(digest, padding.PKCS1v15(), hashes.SHA256())
     
-    # Guarda la firma en disco para enviarla al usuario
-    with open(sig_path,'wb') as sf:
-        sf.write(signature)
-        
-    return send_file(sig_path, as_attachment=True)
+    # Envía la firma generada en memoria al usuario
+    sig_buffer = io.BytesIO(signature)
+    sig_buffer.seek(0)
+    
+    flash('¡Documento firmado exitosamente! Descarga la firma y verifica su autenticidad.', 'success')
+    return send_file(
+        sig_buffer,
+        as_attachment=True,
+        download_name='signature_for_' + pdf_file.filename + '.sig',
+        mimetype='application/octet-stream'
+    )
 
 
 @app.route('/verify_signature', methods=['GET', 'POST'])
-def verify_signature():
+@token_required # <-- RUTA PROTEGIDA
+def verify_signature(current_user): # <-- RECIBE DATOS DE SESIÓN
     if request.method == 'POST':
         # 1. Verificar si se subieron ambos archivos
         if 'pdf_file' not in request.files or 'sig_file' not in request.files:
@@ -332,5 +380,4 @@ def verify_signature():
 if __name__ == '__main__':
     # Usar 0.0.0.0 y puerto 5000 para compatibilidad con Render y entornos de producción
     app.run(host='0.0.0.0', port=5000, debug=True)
-
 

@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block content %}
+
+<h2>Verificar Firma Digital (PDF)</h2>
+
+<p>Sube el archivo PDF original y su firma digital (.sig) para comprobar su autenticidad.</p>
+
+<form method="post" enctype="multipart/form-data">
+    <label for="pdf_file">Documento PDF:</label>
+    <input type="file" name="pdf_file" accept=".pdf" required><br><br>
+    
+    <label for="sig_file">Archivo de Firma (.sig):</label>
+    <input type="file" name="sig_file" accept=".sig" required><br><br>
+    
+    <button type="submit" class="btn">Verificar Firma</button>
+</form>
+
+<hr>
+
+<p>
+    **Pasos de Prueba:**
+    <ol>
+        <li><a href="/generate_pdf">Generar PDF de Prueba</a> (Descargarás 'example_document.pdf')</li>
+        <li><a href="/sign_pdf">Firmar PDF</a> (Descargarás 'example_document.pdf.sig')</li>
+        <li>Sube ambos archivos arriba para verificar la autenticidad.</li>
+    </ol>
+</p>
+
+{% endblock %}

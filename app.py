@@ -4,7 +4,8 @@ from datetime import datetime, timedelta
 from models import DB, init_db
 from pathlib import Path
 from dotenv import load_dotenv
-from flask_mail import Mail, Message  # <-- NUEVA IMPORTACIÓN
+from flask_mail import Mail, Message
+from werkzeug.utils import secure_filename # Para manejar archivos subidos de forma segura
 
 # Cargar variables de entorno (para desarrollo local)
 load_dotenv()
@@ -14,16 +15,20 @@ load_dotenv()
 # ===============================================
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'change_me_securely')
+app.config['UPLOAD_FOLDER'] = 'temp_uploads' # Carpeta temporal para verificación de archivos
+
+# Asegúrate de que la carpeta de subida exista
+if not os.path.exists(app.config['UPLOAD_FOLDER']):
+    os.makedirs(app.config['UPLOAD_FOLDER'])
 
 # ===============================================
 # CONFIGURACIÓN DE CORREO (Flask-Mail)
 # ===============================================
-# **IMPORTANTE:** Necesitas agregar MAIL_PASSWORD a las variables de entorno de Render
 app.config['MAIL_SERVER'] = 'smtp.gmail.com'
 app.config['MAIL_PORT'] = 587
 app.config['MAIL_USE_TLS'] = True
 app.config['MAIL_USERNAME'] = os.getenv('MAIL_SENDER') 
-app.config['MAIL_PASSWORD'] = os.getenv('MAIL_PASSWORD') # Lee de Render/Env
+app.config['MAIL_PASSWORD'] = os.getenv('MAIL_PASSWORD')
 app.config['MAIL_DEFAULT_SENDER'] = os.getenv('MAIL_SENDER')
 
 mail = Mail(app)
@@ -34,19 +39,17 @@ if not DB_PATH.exists():
     init_db()
 
 def get_db_conn():
-    # Usar DB del archivo models.py
     return sqlite3.connect(DB)
 
 # ===============================================
 # JWT y RSA CONFIGURACIÓN
 # ===============================================
-# Cargar claves JWT (para firmas RSA)
 JWT_PRIVATE_KEY_PATH = os.getenv('JWT_PRIVATE_KEY_PATH', 'keys/private.pem')
+JWT_PUBLIC_KEY_PATH = os.getenv('JWT_PUBLIC_KEY_PATH', 'keys/public.pem') # Clave pública para verificación
 JWT_ALGORITHM = os.getenv('JWT_ALGORITHM','RS256')
 
 PRIVATE_KEY = None
 if Path(JWT_PRIVATE_KEY_PATH).exists():
-    # Solo en Render/Producción
     PRIVATE_KEY = open(JWT_PRIVATE_KEY_PATH,'rb').read()
 
 # ===============================================
@@ -124,17 +127,14 @@ def login():
             if PRIVATE_KEY:
                 token = jwt.encode(payload, PRIVATE_KEY, algorithm=JWT_ALGORITHM)
             else:
-                # Usar SECRET_KEY de Flask si no hay clave RSA (MODO DEV)
                 token = jwt.encode(payload, app.config['SECRET_KEY'], algorithm='HS256')
             
             resp = make_response(redirect(url_for('dashboard')))
-            # secure=True es necesario porque Render ya usa HTTPS
             resp.set_cookie('access_token', token, httponly=True, secure=True, samesite='Lax') 
             return resp
         else:
             flash('Usuario o contraseña incorrecta','danger')
     
-    # Pasar la clave pública del sitio para mostrar el widget en el HTML
     return render_template('login.html', recaptcha_site_key=os.getenv('RECAPTCHA_SITE_KEY',''))
 
 @app.route('/dashboard')
@@ -142,7 +142,7 @@ def dashboard():
     return render_template('dashboard.html')
 
 # ===============================================
-# RUTAS DE RECUPERACIÓN DE CONTRASEÑA (NUEVO)
+# RUTAS DE RECUPERACIÓN DE CONTRASEÑA
 # ===============================================
 
 @app.route('/forgot_password', methods=['GET', 'POST'])
@@ -157,15 +157,12 @@ def forgot_password():
 
         if user_id:
             user_id = user_id[0]
-            # 1. Generar token JWT con tiempo limitado (ej. 30 minutos)
             payload = {
                 'user_id': user_id,
                 'exp': datetime.utcnow() + timedelta(minutes=30)
             }
-            # Usar la clave de la app para firmar el token de recuperación
             reset_token = jwt.encode(payload, app.config['SECRET_KEY'], algorithm='HS256')
 
-            # 2. Enviar email
             reset_url = url_for('reset_password', token=reset_token, _external=True)
             msg = Message('Restablecimiento de Contraseña DarkGate', recipients=[email])
             msg.body = f'Para restablecer tu contraseña, haz clic en el siguiente enlace: {reset_url}'
@@ -174,7 +171,6 @@ def forgot_password():
                 mail.send(msg)
                 flash('Se ha enviado un correo con instrucciones para restablecer tu contraseña.', 'info')
             except Exception as e:
-                # Esto atrapará errores de conexión o autenticación de correo
                 flash(f'Error al enviar el correo. Revisa la configuración MAIL_PASSWORD en Render. Error: {e}', 'danger')
         else:
             flash('No existe una cuenta con ese correo electrónico.', 'danger')
@@ -185,7 +181,6 @@ def forgot_password():
 @app.route('/reset_password/<token>', methods=['GET', 'POST'])
 def reset_password(token):
     try:
-        # Decodificar el token usando la clave de la app
         data = jwt.decode(token, app.config['SECRET_KEY'], algorithms=['HS256'])
         user_id = data.get('user_id')
     except jwt.ExpiredSignatureError:
@@ -231,22 +226,78 @@ def sign_pdf_route():
     sig_path = 'static/example_document.pdf.sig'
     if not os.path.exists(pdf_path):
         return "Primero generar el PDF en /generate_pdf", 400
+    
     # calcular hash
     with open(pdf_path,'rb') as f:
         pdf_bytes = f.read()
     digest = hashlib.sha256(pdf_bytes).digest()
+    
     # firmar con clave privada si existe
     from cryptography.hazmat.primitives.serialization import load_pem_private_key
     from cryptography.hazmat.primitives.asymmetric import padding
     from cryptography.hazmat.primitives import hashes
+    
     if not os.path.exists(JWT_PRIVATE_KEY_PATH):
         return "No existe la clave privada en keys/private.pem. Genere las claves.", 500
+    
     with open(JWT_PRIVATE_KEY_PATH,'rb') as kf:
         private = load_pem_private_key(kf.read(), password=None)
+        
     signature = private.sign(digest, padding.PKCS1v15(), hashes.SHA256())
+    
     with open(sig_path,'wb') as sf:
         sf.write(signature)
+        
     return send_file(sig_path, as_attachment=True)
+
+
+@app.route('/verify_signature', methods=['GET', 'POST'])
+def verify_signature():
+    if request.method == 'POST':
+        # 1. Verificar si se subieron ambos archivos
+        if 'pdf_file' not in request.files or 'sig_file' not in request.files:
+            flash('Debes subir el archivo PDF y su firma (.sig).', 'danger')
+            return redirect(url_for('verify_signature'))
+
+        pdf_file = request.files['pdf_file']
+        sig_file = request.files['sig_file']
+
+        if pdf_file.filename == '' or sig_file.filename == '':
+            flash('Debes seleccionar archivos válidos.', 'danger')
+            return redirect(url_for('verify_signature'))
+        
+        # 2. Leer archivos y calcular hash del PDF
+        pdf_bytes = pdf_file.read()
+        sig_bytes = sig_file.read()
+        digest = hashlib.sha256(pdf_bytes).digest()
+
+        # 3. Cargar clave pública
+        from cryptography.hazmat.primitives.serialization import load_pem_public_key
+        from cryptography.hazmat.primitives.asymmetric import padding
+        from cryptography.hazmat.primitives import hashes
+        
+        if not os.path.exists(JWT_PUBLIC_KEY_PATH):
+            flash("Error: No se encontró la clave pública (keys/public.pem) en el servidor.", 'danger')
+            return redirect(url_for('verify_signature'))
+
+        with open(JWT_PUBLIC_KEY_PATH, 'rb') as kf:
+            public_key = load_pem_public_key(kf.read())
+
+        # 4. Verificar la firma
+        try:
+            public_key.verify(
+                sig_bytes,
+                digest,
+                padding.PKCS1v15(),
+                hashes.SHA256()
+            )
+            flash('✅ ¡Firma digital VERIFICADA! El documento es auténtico y no ha sido alterado.', 'success')
+        except Exception as e:
+            flash(f'❌ ¡Firma INVÁLIDA! El documento fue alterado o no fue firmado con nuestra clave. Error: {e}', 'danger')
+        
+        return redirect(url_for('verify_signature'))
+
+    return render_template('verify_signature.html')
 
 if __name__ == '__main__':
     # Usar 0.0.0.0 y puerto 5000 para compatibilidad con Render y entornos de producción

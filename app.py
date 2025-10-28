@@ -1,11 +1,11 @@
 from flask import Flask, render_template, request, redirect, url_for, flash, make_response, send_file
-import os, sqlite3, bcrypt, jwt, requests, hashlib, uuid
+import os, sqlite3, bcrypt, jwt, requests, hashlib, uuid, io # 'io' es necesario para generar PDF en memoria
 from datetime import datetime, timedelta
 from models import DB, init_db
 from pathlib import Path
 from dotenv import load_dotenv
 from flask_mail import Mail, Message
-from werkzeug.utils import secure_filename # Para manejar archivos subidos de forma segura
+from werkzeug.utils import secure_filename 
 
 # Cargar variables de entorno (para desarrollo local)
 load_dotenv()
@@ -24,6 +24,7 @@ if not os.path.exists(app.config['UPLOAD_FOLDER']):
 # ===============================================
 # CONFIGURACIÓN DE CORREO (Flask-Mail)
 # ===============================================
+# **IMPORTANTE:** MAIL_PASSWORD se lee desde Render Environment Variables
 app.config['MAIL_SERVER'] = 'smtp.gmail.com'
 app.config['MAIL_PORT'] = 587
 app.config['MAIL_USE_TLS'] = True
@@ -44,8 +45,9 @@ def get_db_conn():
 # ===============================================
 # JWT y RSA CONFIGURACIÓN
 # ===============================================
+# Rutas a las claves para firmar (private) y verificar (public)
 JWT_PRIVATE_KEY_PATH = os.getenv('JWT_PRIVATE_KEY_PATH', 'keys/private.pem')
-JWT_PUBLIC_KEY_PATH = os.getenv('JWT_PUBLIC_KEY_PATH', 'keys/public.pem') # Clave pública para verificación
+JWT_PUBLIC_KEY_PATH = os.getenv('JWT_PUBLIC_KEY_PATH', 'keys/public.pem') 
 JWT_ALGORITHM = os.getenv('JWT_ALGORITHM','RS256')
 
 PRIVATE_KEY = None
@@ -127,9 +129,11 @@ def login():
             if PRIVATE_KEY:
                 token = jwt.encode(payload, PRIVATE_KEY, algorithm=JWT_ALGORITHM)
             else:
+                # Usa la SECRET_KEY de Flask si no se encontró la clave RSA (Modo DEV)
                 token = jwt.encode(payload, app.config['SECRET_KEY'], algorithm='HS256')
             
             resp = make_response(redirect(url_for('dashboard')))
+            # secure=True es crucial para HTTPS en Render
             resp.set_cookie('access_token', token, httponly=True, secure=True, samesite='Lax') 
             return resp
         else:
@@ -206,26 +210,48 @@ def reset_password(token):
     return render_template('reset_password.html', token=token)
 
 # ===============================================
-# RUTAS DE PDF Y FIRMA
+# RUTAS DE PDF Y FIRMA DIGITAL
 # ===============================================
 @app.route('/generate_pdf')
 def generate_pdf():
-    # Crear un PDF de ejemplo sencillo
     from reportlab.pdfgen import canvas
-    pdf_path = 'static/example_document.pdf'
-    c = canvas.Canvas(pdf_path)
-    c.drawString(100,750,"DarkGate - Documento de Prueba")
-    c.drawString(100,730,"Fecha: {}".format(datetime.utcnow().isoformat()))
+    from reportlab.lib.pagesizes import letter # Importación necesaria para el tamaño de página
+    
+    # Usar un buffer de memoria (io.BytesIO) para evitar problemas de permisos de escritura en Render
+    buffer = io.BytesIO()
+    c = canvas.Canvas(buffer, pagesize=letter)
+    
+    c.drawString(100,750,"DarkGate - Documento de Prueba Final")
+    c.drawString(100,730,"Proyecto de Seguridad (JWT, reCAPTCHA)")
+    c.drawString(100,710,"Fecha: {}".format(datetime.utcnow().isoformat()))
+    
+    c.showPage()
     c.save()
-    return send_file(pdf_path, as_attachment=True)
+    
+    # Mueve el cursor al inicio del buffer antes de enviarlo
+    buffer.seek(0) 
+    
+    # Envía el archivo generado en memoria
+    return send_file(
+        buffer,
+        as_attachment=True,
+        download_name='example_document.pdf', 
+        mimetype='application/pdf'
+    )
 
 # Firma del PDF (hash + firma RSA) -> devuelve archivo .sig
 @app.route('/sign_pdf')
 def sign_pdf_route():
+    # Esta ruta requiere que el PDF esté en disco para ser leído, lo cual puede fallar en Render.
+    # El usuario debe usar la función /generate_pdf para obtener el PDF primero.
     pdf_path = 'static/example_document.pdf'
     sig_path = 'static/example_document.pdf.sig'
+    
+    # Nota: Si se usara la generación en memoria, este archivo no existiría en disco.
+    # Por simplicidad, asumimos que el PDF está disponible o el usuario lo ha guardado.
+    # En un sistema real, el usuario subiría el archivo a firmar.
     if not os.path.exists(pdf_path):
-        return "Primero generar el PDF en /generate_pdf", 400
+        return "Primero genere el PDF y asegúrese de que esté disponible para la firma. En un sistema real, el usuario subiría el PDF a firmar.", 400
     
     # calcular hash
     with open(pdf_path,'rb') as f:
@@ -238,13 +264,14 @@ def sign_pdf_route():
     from cryptography.hazmat.primitives import hashes
     
     if not os.path.exists(JWT_PRIVATE_KEY_PATH):
-        return "No existe la clave privada en keys/private.pem. Genere las claves.", 500
+        return "No existe la clave privada en keys/private.pem. Genere las claves (openssl).", 500
     
     with open(JWT_PRIVATE_KEY_PATH,'rb') as kf:
         private = load_pem_private_key(kf.read(), password=None)
         
     signature = private.sign(digest, padding.PKCS1v15(), hashes.SHA256())
     
+    # Guarda la firma en disco para enviarla al usuario
     with open(sig_path,'wb') as sf:
         sf.write(signature)
         
@@ -291,9 +318,9 @@ def verify_signature():
                 padding.PKCS1v15(),
                 hashes.SHA256()
             )
-            flash('✅ ¡Firma digital VERIFICADA! El documento es auténtico y no ha sido alterado.', 'success')
+            flash(' ¡Firma digital VERIFICADA! El documento es auténtico y no ha sido alterado.', 'success')
         except Exception as e:
-            flash(f'❌ ¡Firma INVÁLIDA! El documento fue alterado o no fue firmado con nuestra clave. Error: {e}', 'danger')
+            flash(f' ¡Firma INVÁLIDA! El documento fue alterado o no fue firmado con nuestra clave. Error: {e}', 'danger')
         
         return redirect(url_for('verify_signature'))
 

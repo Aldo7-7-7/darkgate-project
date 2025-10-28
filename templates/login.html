@@ -8,7 +8,7 @@
     <label>Usuario</label><input name="username" required>
     <label>Contraseña</label><input name="password" type="password" required>
 
-    <!-- El WIDGET de reCAPTCHA va DENTRO del formulario -->
+    <!-- El WIDGET de reCAPTCHA se muestra si la clave está en el entorno -->
     {% if recaptcha_site_key %}
         <div class="g-recaptcha" data-sitekey="{{ recaptcha_site_key }}"></div>
     {% endif %}
@@ -28,7 +28,7 @@
     <a href="{{ url_for('verify_signature') }}">Verificar Firma</a>  
 </p>
 
-<!-- El SCRIPT de Google va aquí, fuera del formulario, para cargarse correctamente -->
+<!-- El SCRIPT de Google va aquí para cargarse correctamente -->
 {% if recaptcha_site_key %}
     <script src="https://www.google.com/recaptcha/api.js" async defer></script>
 {% endif %}
